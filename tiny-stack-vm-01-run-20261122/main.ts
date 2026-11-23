@@ -7,8 +7,7 @@ const MEMORY_WORDS = 256;
 const OUTPUT_BYTES = 65_536;
 const MAX_STEPS = 1_000_000;
 
-// Each row covers the defined opcodes in one high nibble, starting at low nibble 0.
-// Digits specify the required stack depth; a missing digit denotes an unknown opcode.
+// Stack depths by opcode nibble; missing entries are unknown opcodes.
 const required = ['00011223', '222222212221222', '222', '01100', '12', '1101'];
 
 function binary(op: number, a: number, b: number): number {
@@ -42,21 +41,21 @@ function execute(program: Buffer, input: Buffer) {
   const finish = (exit: number) => ({ exit, stdout: output.subarray(0, written) });
 
   for (let step = 0; step < MAX_STEPS; step++) {
-    if (pc < 0 || pc >= program.length) return finish(9);
     const op = program[pc++];
+    if (op === undefined) return finish(9);
     const needs = required[op >> 4]?.[op & 15];
     if (needs === undefined) return finish(5);
-    const width = op === 1 ? 1 : op === 2 ? 4 : op >= 0x30 && op <= 0x33 ? 2 : 0;
-    if (pc + width > program.length) return finish(9);
-    const depth = Number(needs);
-    if (sp < depth) return finish(2);
+    const immediate = pc;
+    pc += op === 1 ? 1 : op === 2 ? 4 : op >= 0x30 && op <= 0x33 ? 2 : 0;
+    if (pc > program.length) return finish(9);
+    if (sp < Number(needs)) return finish(2);
     if (sp === DATA_WORDS && (op === 1 || op === 2 || op === 4 || op === 6 || op === 0x52)) return finish(3);
 
     const top = stack[sp - 1];
     switch (op) {
       case 0x00: return finish(0);
-      case 0x01: stack[sp++] = program.readInt8(pc++); break;
-      case 0x02: stack[sp++] = program.readInt32LE(pc); pc += 4; break;
+      case 0x01: stack[sp++] = program.readInt8(immediate); break;
+      case 0x02: stack[sp++] = program.readInt32LE(immediate); break;
       case 0x03: sp--; break;
       case 0x04: stack[sp++] = top; break;
       case 0x05: stack[sp - 1] = stack[sp - 2]; stack[sp - 2] = top; break;
@@ -70,19 +69,15 @@ function execute(program: Buffer, input: Buffer) {
       }
       case 0x17: stack[sp - 1] = -top; break;
       case 0x1b: stack[sp - 1] = ~top; break;
-      case 0x30: case 0x31: case 0x32: {
-        const offset = program.readInt16LE(pc);
-        pc += 2;
+      case 0x30: case 0x31: case 0x32:
         if (op !== 0x30) sp--;
-        if (op === 0x30 || (op === 0x31 ? top === 0 : top !== 0)) pc += offset;
+        if (op === 0x30 || (op === 0x31 ? top === 0 : top !== 0)) pc += program.readInt16LE(immediate);
         break;
-      }
-      case 0x33: {
+      case 0x33:
         if (cp === CALL_WORDS) return finish(7);
-        calls[cp++] = pc + 2;
-        pc = program.readUInt16LE(pc);
+        calls[cp++] = pc;
+        pc = program.readUInt16LE(immediate);
         break;
-      }
       case 0x34:
         if (cp === 0) return finish(8);
         pc = calls[--cp];
@@ -92,19 +87,14 @@ function execute(program: Buffer, input: Buffer) {
         if (op === 0x40) stack[sp - 1] = memory[top];
         else { memory[top] = stack[sp - 2]; sp -= 2; }
         break;
-      case 0x50: {
-        const text = String(top);
+      case 0x50: case 0x51: {
+        const text = op === 0x50 ? String(top) : String.fromCharCode(top & 255);
         if (written + text.length > OUTPUT_BYTES) return finish(11);
-        written += output.write(text, written, text.length, 'ascii');
+        written += output.write(text, written, 'latin1');
         sp--;
         break;
       }
-      case 0x51:
-        if (written === OUTPUT_BYTES) return finish(11);
-        output[written++] = top & 255;
-        sp--;
-        break;
-      case 0x52: stack[sp++] = read < input.length ? input[read++] : -1; break;
+      case 0x52: stack[sp++] = input[read++] ?? -1; break;
       case 0x53: return finish(top & 255);
       default:
         if (op >= 0x13 && op <= 0x16 && top === 0) return finish(4);
