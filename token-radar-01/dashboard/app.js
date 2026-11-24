@@ -108,24 +108,56 @@
       $board.replaceChildren(nodes(node('tr'), message));
     }
     function pair(term, value) { return nodes(node('div'), node('dt', '', term), node('dd', '', value)); }
+    function sensitivityPanel(p) {
+      const s = p.model.sensitivity;
+      const shock = Math.round(s.shock * 100);
+      const change = value => (value - p.implied_value_usd) / p.implied_value_usd * 100;
+      const line = (label, value) => {
+        const item = pair(label, `${short(value)} · ${percentage(change(value))}`);
+        item.querySelector('dd').title = usd.format(value);
+        return item;
+      };
+      return nodes(node('section', 'stress'), node('h4', '', 'Sensitivity · one input at a time'),
+        nodes(node('dl', 'inputs'), line(`Peer multiple −${shock}%`, s.multipleDown),
+          line(`Peer multiple +${shock}%`, s.multipleUp), line('Flat 7d momentum', s.flatMomentum), line('Neutral age factor', s.neutralAge)),
+        node('p', 'aside-note', 'Changes are relative to base. Other inputs stay fixed; stress cases do not change board rank.'));
+    }
+    function peerDisclosure(m) {
+      const detail = nodes(node('details', 'evidence'), node('summary', '', `Inspect ${m.peerCount} priced peers · ${m.scope}`));
+      if (!m.peers.length) return nodes(detail, node('p', 'aside-note', 'No qualifying cohort. A stated 0.35× fallback is used.'));
+      const notes = node('p', 'aside-note', 'Ratios below are the model inputs, clipped to 0.05–3×.');
+      return nodes(detail, notes, nodes(node('ul', 'peer-list'), ...m.peers.map(peer => {
+        const item = nodes(node('li'), node('span', '', peer.name), node('code', '', `${peer.ratio.toFixed(3)}×`));
+        item.title = peer.slug;
+        return item;
+      })));
+    }
     function estimate(p) {
       const m = p.model;
       const scenarios = nodes(node('dl', 'scenarios'), pair('Low', short(p.low)), pair('Base', short(p.implied_value_usd)), pair('High', short(p.high)));
       scenarios.querySelectorAll('dd')[1].title = usd.format(p.implied_value_usd);
       const inputs = nodes(node('dl', 'inputs'), pair('Snapshot TVL', usd.format(p.tvl_usd)),
-        pair('Peer proxy', `${m.multiple.toFixed(2)}× · ${m.peerCount} peers`), pair('Peer cohort', m.scope),
+        pair('Peer proxy', `${m.multiple.toFixed(3)}× · ${m.peerCount} peers`),
         pair('7d momentum', `${percentage(p.change_7d)} → ${m.growth.toFixed(2)}×`),
-        pair('Time tracked', `${m.listingDays == null ? '—' : `${m.listingDays}d`} → ${m.age.toFixed(2)}×`), pair('Model evidence', m.evidence));
-      return nodes(node('section', 'card'), node('p', 'eyebrow', '01 / IMPLIED USD'), node('h3', '', 'Launch scenario'), scenarios, inputs,
-        node('p', 'aside-note', 'Scenario estimate, not a traded price, launch probability, or expected reward. The peer median uses reported market cap as a proxy.'));
+        pair('Time tracked', `${m.listingDays == null ? '—' : `${m.listingDays}d`} → ${m.age.toFixed(3)}×`), pair('Peer fit', m.evidence));
+      return nodes(node('section', 'card'), node('p', 'eyebrow', '01 / IMPLIED USD'), node('h3', '', 'Launch scenario'), scenarios,
+        node('p', 'formula', 'TVL × peer median × momentum × age'), inputs, sensitivityPanel(p), peerDisclosure(m),
+        node('p', 'aside-note', 'The low/high band is a peer-derived scenario, not a confidence interval. The base is not a traded price, FDV or launch probability.'));
     }
     function workflow(p) {
       const steps = p.farm_steps.map(step => {
         const delimiter = step.indexOf(' — ');
         return nodes(node('li'), node('strong', '', step.slice(0, delimiter)), node('span', '', step.slice(delimiter + 3)));
       });
-      return nodes(node('section', 'card'), node('p', 'eyebrow', '02 / FARM WORKFLOW'), node('h3', '', p.plan.label),
-        node('p', 'cost', `Illustrative · ${p.plan.capital} exposure · ${p.plan.fee} network fees · ${p.plan.minutes} active`), nodes(node('ol', 'steps'), ...steps));
+      const plan = p.plan;
+      const documented = plan.kind === 'documented';
+      const section = nodes(node('section', 'card'), node('p', 'eyebrow', `02 / ${documented ? 'DOCUMENTED PRODUCT' : 'UNVERIFIED PRODUCT'}`),
+        node('h3', '', plan.label), nodes(node('dl', 'plan-facts'), pair('Exposure', plan.capital), pair('Round-trip fees', plan.fee), pair('Active time*', plan.minutes)),
+        node('p', 'cost', `Exit: ${plan.window}`), nodes(node('ol', 'steps'), ...steps),
+        node('p', 'aside-note', '*Active time is an estimate. Product documentation is not a live quote or proof of rewards.'));
+      if (!documented) return section;
+      const sources = plan.sources.map(source => nodes(node('li'), node('strong', '', source.title), node('code', '', source.url)));
+      return nodes(section, nodes(node('details', 'evidence'), node('summary', '', `Official sources · ${sources.length}`), nodes(node('ul', 'source-list'), ...sources)));
     }
     function openDetail(p) {
       const heading = node('h2', 'detail-heading', p.name);

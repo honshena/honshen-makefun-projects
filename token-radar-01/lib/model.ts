@@ -62,14 +62,30 @@ function peerBand(p: Protocol, peers: Protocol[]) {
     { scope: 'All priced peers', set: peers },
   ];
   const cohort = pools.find(x => x.set.length >= MIN_PEERS);
-  if (!cohort) return { scope: 'Assumption', peerCount: 0, multiple: DEFAULT_MULTIPLE, lowFactor: 0.45, highFactor: 2.15 };
-  const ratios = cohort.set.map(x => clamp(x.mcap_usd! / x.tvl_usd, 0.05, 3)).sort((a, b) => a - b);
+  if (!cohort) return { scope: 'Assumption', peerCount: 0, multiple: DEFAULT_MULTIPLE, lowFactor: 0.45, highFactor: 2.15, peers: [] };
+  const evidence = cohort.set.map(x => ({
+    slug: x.slug, name: x.name, ratio: clamp(x.mcap_usd! / x.tvl_usd, 0.05, 3),
+  })).toSorted((a, b) => a.ratio - b.ratio || order(a.slug, b.slug));
+  const ratios = evidence.map(x => x.ratio);
   const multiple = quantile(ratios, 0.5);
   const tight = cohort.scope === 'Category + size';
   return {
-    scope: cohort.scope, peerCount: ratios.length, multiple,
+    scope: cohort.scope, peerCount: ratios.length, multiple, peers: evidence,
     lowFactor: clamp(quantile(ratios, 0.25) / multiple, 0.35, tight ? 0.82 : 0.68),
     highFactor: clamp(quantile(ratios, 0.75) / multiple, tight ? 1.18 : 1.45, 2.6),
+  };
+}
+
+const quote = (value: number) => clamp(Math.round(value), 1, MAX_VALUE);
+
+function sensitivities(tvl: number, multiple: number, growth: number, age: number) {
+  const shock = 0.2;
+  return {
+    shock,
+    multipleDown: quote(tvl * (multiple * (1 - shock)) * growth * age),
+    multipleUp: quote(tvl * (multiple * (1 + shock)) * growth * age),
+    flatMomentum: quote(tvl * multiple * age),
+    neutralAge: quote(tvl * multiple * growth),
   };
 }
 
@@ -79,15 +95,15 @@ function score(p: Protocol, peers: Protocol[], asOf: string) {
   const growth = p.change_7d === null ? 1 : 1 + clamp(p.change_7d, -35, 35) / 100;
   const age = listingDays === null ? 1 : 0.88 + 0.35 * Math.min(listingDays, 730) / 730;
   const raw = p.tvl_usd * band.multiple * growth * age;
-  const value = clamp(Math.round(raw), 1, MAX_VALUE);
+  const value = quote(raw);
   const uncertainty = p.change_7d === null || listingDays === null ? 1.18 : 1;
   const evidence = band.scope === 'Category + size' && band.peerCount >= 8 && uncertainty === 1 ? 'Stronger'
     : band.peerCount >= MIN_PEERS && uncertainty === 1 ? 'Moderate' : 'Limited';
   return {
     implied_value_usd: value,
-    low: Math.min(value, clamp(Math.round(raw * band.lowFactor / uncertainty), 1, MAX_VALUE)),
-    high: Math.max(value, clamp(Math.round(raw * band.highFactor * uncertainty), 1, MAX_VALUE)),
-    model: { ...band, listingDays, growth, age, evidence },
+    low: Math.min(value, quote(raw * band.lowFactor / uncertainty)),
+    high: Math.max(value, quote(raw * band.highFactor * uncertainty)),
+    model: { ...band, listingDays, growth, age, evidence, sensitivity: sensitivities(p.tvl_usd, band.multiple, growth, age) },
   };
 }
 
