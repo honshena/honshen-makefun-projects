@@ -100,7 +100,7 @@ function render(nodes, scope, templates, depth) {
     if (typeof node === 'string') { html += node; continue; }
     const [op, path, arg, body, otherwise] = node;
     if (op === 'include') {
-      if (depth < 8 && templates.has(path)) html += render(templates.get(path), scope, templates, depth + 1);
+      if (depth < INCLUDE_LIMIT && templates.has(path)) html += render(templates.get(path), scope, templates, depth + 1);
       continue;
     }
     const value = lookup(scope, path);
@@ -120,12 +120,74 @@ function render(nodes, scope, templates, depth) {
 }
 
 const own = (value, key) => value !== null && typeof value === 'object' && Object.hasOwn(value, key) ? value[key] : undefined;
-const escaped = value => escape(asText(value));
 const MAX_EMITTED_NODES = 1800;
+const MAX_ANALYSIS_NESTING = 128;
+const INCLUDE_LIMIT = 8;
 
-function specialize(root, templates) {
+// Free names include nested includes, but exclude loop-local names. If analysis
+// gets too deep, leave the partial unspecialized rather than following cold branches.
+function freeNames(nodes, templates, depth, cache, nesting = 0) {
+  if (nesting >= MAX_ANALYSIS_NESTING) return null;
+  const namesAtDepth = cache[depth];
+  const cached = namesAtDepth.get(nodes);
+  if (cached) return cached;
+  const roots = new Set();
+  for (const node of nodes) {
+    if (typeof node === 'string') continue;
+    const [op, path, arg, body, otherwise] = node;
+    if (op === 'include') {
+      const included = templates.get(path);
+      if (depth < INCLUDE_LIMIT && included) {
+        const child = freeNames(included, templates, depth + 1, cache, nesting + 1);
+        if (!child) return null;
+        for (const name of child) roots.add(name);
+      }
+      continue;
+    }
+    roots.add(path[0]);
+    if (op !== 'for' && op !== 'if') continue;
+    const child = freeNames(body, templates, depth, cache, nesting + 1);
+    if (!child) return null;
+    for (const name of child) {
+      if (op !== 'for' || (name !== arg && name !== 'loop')) roots.add(name);
+    }
+    if (op === 'if') {
+      const other = freeNames(otherwise, templates, depth, cache, nesting + 1);
+      if (!other) return null;
+      for (const name of other) roots.add(name);
+    }
+  }
+  namesAtDepth.set(nodes, roots);
+  return roots;
+}
+
+function sharedPartials(templates, shared) {
+  const depths = Array.from({ length: INCLUDE_LIMIT + 1 }, () => new Map());
+  const renderers = Array.from({ length: INCLUDE_LIMIT + 1 }, () => new Map());
+  return (nodes, bindings, depth) => {
+    const roots = freeNames(nodes, templates, depth, depths);
+    if (!roots) return undefined;
+    for (const name of roots) {
+      if (bindings.has(name) || !Object.hasOwn(shared, name)) return undefined;
+    }
+    const cache = renderers[depth];
+    if (!cache.has(nodes)) {
+      let html;
+      cache.set(nodes, () => html ??= render(nodes, { values: shared, parent: null }, templates, depth));
+    }
+    return cache.get(nodes);
+  };
+}
+
+const needsEscape = /[&<>"']/;
+const escaped = value => {
+  const text = asText(value);
+  return needsEscape.test(text) ? escape(text) : text;
+};
+
+function specialize(root, templates, shared) {
   let serial = 0, visited = 0;
-  const code = [];
+  const code = [], constants = [];
   const pathCode = (path, bindings) => {
     let expr = bindings.get(path[0]) ?? `own(values,${JSON.stringify(path[0])})`;
     for (let i = 1; i < path.length; i++) expr = `own(${expr},${JSON.stringify(path[i])})`;
@@ -144,7 +206,12 @@ function specialize(root, templates) {
       const [op, path, arg, body, otherwise] = node;
       if (op === 'include') {
         const included = templates.get(path);
-        if (depth < 8 && included && !emit(included, bindings, depth + 1)) return false;
+        if (depth === INCLUDE_LIMIT || !included) continue;
+        const fragment = shared?.(included, bindings, depth + 1);
+        if (fragment !== undefined) {
+          code.push(`out+=constants[${constants.length}]();`);
+          constants.push(fragment);
+        } else if (!emit(included, bindings, depth + 1)) return false;
         continue;
       }
       const expr = pathCode(path, bindings);
@@ -167,7 +234,9 @@ function specialize(root, templates) {
   };
   if (!emit(root, new Map(), 0)) return null;
   // Only serialized literals/keys and compiler-assigned variable names enter the generated program.
-  return new Function('own', 'asText', 'escaped', 'truth', `return values=>{let out='';${code.join('')}return out;}`)(own, asText, escaped, truth);
+  const factory = new Function('own', 'asText', 'escaped', 'truth', 'constants',
+    `return values=>{let out='';${code.join('')}return out;}`);
+  return factory(own, asText, escaped, truth, constants);
 }
 
 export function compile(sources, report) {
@@ -180,15 +249,25 @@ export function compile(sources, report) {
       report.push(`template "${name}": ${error.message}`);
     }
   }
-  const compiled = new Map();
   return {
     has: name => templates.has(name),
-    render: (name, values) => {
-      const nodes = templates.get(name);
-      if (nodes === undefined) return null;
-      if (!compiled.has(name)) compiled.set(name, specialize(nodes, templates));
-      const fn = compiled.get(name);
-      return fn ? fn(values) : render(nodes, { values, parent: null }, templates, 0);
+    renderer(shared) {
+      const compiled = new Map();
+      const partial = sharedPartials(templates, shared);
+      return (name, local) => {
+        const nodes = templates.get(name);
+        if (nodes === undefined) return null;
+        // Keep the generic scope semantics if a caller overrides a shared root.
+        const values = { ...shared, ...local };
+        for (const key in local) {
+          if (Object.hasOwn(local, key) && Object.hasOwn(shared, key)) {
+            return render(nodes, { values, parent: null }, templates, 0);
+          }
+        }
+        if (!compiled.has(name)) compiled.set(name, specialize(nodes, templates, partial));
+        const fn = compiled.get(name);
+        return fn ? fn(values) : render(nodes, { values, parent: null }, templates, 0);
+      };
     },
   };
 }

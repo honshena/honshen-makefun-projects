@@ -75,18 +75,20 @@ function tagRefs(names, slugCache, visit) {
 }
 
 function tagGroups(posts, base, slugCache) {
-  const groups = new Map();
+  const groups = new Map(), postTags = new Map();
   for (const post of posts) {
-    tagRefs(post.data.tags, slugCache, (name, key) => {
+    const refs = tagRefs(post.data.tags, slugCache, (name, key) => {
       let group = groups.get(key);
       if (!group) {
         group = { link: { name, slug: key, url: `${base}/tags/${key}/` }, posts: [] };
         groups.set(key, group);
       }
       group.posts.push(post);
+      return group.link;
     });
+    postTags.set(post, refs);
   }
-  return groups;
+  return { groups, postTags };
 }
 
 function readingMinutes(body) {
@@ -97,9 +99,8 @@ function readingMinutes(body) {
   return minutes;
 }
 
-function card(page, excerpt, groups, slugCache) {
+function card(page, excerpt, tags) {
   const { title, date = '', summary = '' } = page.data;
-  const tags = tagRefs(page.data.tags, slugCache, (name, key) => groups.get(key)?.link ?? { name, slug: key, url: '' });
   return { title, url: page.url, date, date_long: dateLong(date), summary, excerpt, reading_minutes: readingMinutes(page.body), tags };
 }
 
@@ -109,18 +110,17 @@ function neighbor(card) {
   return { title, url, date, date_long };
 }
 
-function writeIndexes(output, templates, shared, base, cards, per) {
-  if (!templates.has('index')) return;
+function writeIndexes(output, render, base, cards, per) {
   const total = Math.max(1, Math.ceil(cards.length / per));
   const url = k => k === 1 ? `${base}/` : `${base}/page/${k}/`;
   for (let k = 1; k <= total; k++) {
     const pager = { number: k, total, url: url(k), newer_url: k > 1 ? url(k - 1) : '', older_url: k < total ? url(k + 1) : '' };
     const posts = cards.slice((k - 1) * per, k * per);
-    output[k === 1 ? 'index.html' : `page/${k}/index.html`] = templates.render('index', { ...shared, posts, pager });
+    output[k === 1 ? 'index.html' : `page/${k}/index.html`] = render('index', { posts, pager });
   }
 }
 
-function writePages(output, templates, shared, pages, posts, rendered, cards) {
+function writePages(output, render, pages, posts, rendered, cards) {
   const neighbors = posts.map(post => neighbor(cards.get(post)));
   const rank = new Map(posts.map((post, index) => [post, index]));
   for (const page of pages) {
@@ -129,7 +129,7 @@ function writePages(output, templates, shared, pages, posts, rendered, cards) {
     const view = { ...cards.get(page), slug: page.slug, content, toc,
       newer: place === undefined ? null : neighbors[place - 1] ?? null,
       older: place === undefined ? null : neighbors[place + 1] ?? null, is_post: page.post };
-    output[`${page.route}/index.html`] = templates.render(page.layout, { ...shared, page: view });
+    output[`${page.route}/index.html`] = render(page.layout, { page: view });
   }
 }
 
@@ -141,26 +141,30 @@ export function run(input) {
   const locations = new Map(statics);
   for (const page of pages) locations.set(page.path, page.url);
   const posts = pages.filter(page => page.post).sort((a, b) => compare(b.data.date, a.data.date) || compare(a.slug, b.slug));
-  const slugCache = new Map(), groups = tagGroups(posts, base, slugCache);
+  const slugCache = new Map();
+  const { groups, postTags } = tagGroups(posts, base, slugCache);
   const ordered = Array.from(groups.values()).sort((a, b) => b.posts.length - a.posts.length || compare(a.link.slug, b.link.slug));
   const rendered = new Map(), cards = new Map();
+  const pageTag = (name, key) => groups.get(key)?.link ?? { name, slug: key, url: '' };
   for (const page of pages) {
     const result = markdown(page.body, linksFor(page, locations, broken));
+    const refs = postTags.get(page) ?? tagRefs(page.data.tags, slugCache, pageTag);
     rendered.set(page, result);
-    cards.set(page, card(page, result.excerpt, groups, slugCache));
+    cards.set(page, card(page, result.excerpt, refs));
   }
   const postCards = posts.map(post => cards.get(post));
   const tags = ordered.map(({ link, posts }) => ({ ...link, count: posts.length }));
   const shared = { site: { title: input.site.title, base_url: base }, tags, recent: postCards.slice(0, input.site.recent) };
-  writePages(output, templates, shared, pages, posts, rendered, cards);
-  writeIndexes(output, templates, shared, base, postCards, input.site.per_page);
+  const render = templates.renderer(shared);
+  writePages(output, render, pages, posts, rendered, cards);
+  if (templates.has('index')) writeIndexes(output, render, base, postCards, input.site.per_page);
   if (templates.has('tag')) {
     ordered.forEach((group, i) => {
       const tag = { ...tags[i], posts: group.posts.map(post => cards.get(post)) };
-      output[`tags/${tag.slug}/index.html`] = templates.render('tag', { ...shared, tag });
+      output[`tags/${tag.slug}/index.html`] = render('tag', { tag });
     });
   }
-  if (templates.has('tags')) output['tags/index.html'] = templates.render('tags', shared);
+  if (templates.has('tags')) output['tags/index.html'] = render('tags');
   for (const { path, content } of staticFiles) {
     if (Object.hasOwn(output, path)) report.push(`shadowed ${path}: a built page has its path`);
     else output[path] = content;
