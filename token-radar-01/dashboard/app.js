@@ -32,6 +32,9 @@
     const label = p => p.category ?? 'Unclassified';
     const network = p => p.chains.length > 2 ? `${p.chains.slice(0, 2).join(' / ')} +${p.chains.length - 2}` : p.chains.join(' / ') || 'Network unreported';
     const datasets = [...data.rows, ...data.references];
+    const searchTerms = new Map(datasets.map(p => [
+      p, [p.name, p.slug, p.symbol, label(p), ...p.chains].filter(Boolean).map(value => value.toLowerCase()),
+    ]));
     const signal = p => p.mcap_usd > 0 ? 'Market cap recorded' : p.symbol ? `Ticker: ${p.symbol}` : 'CoinGecko record';
 
     function options() {
@@ -53,7 +56,7 @@
       const [q, chain, category, scope, sort] = $inputs.map(input => input.value);
       const query = q.trim().toLowerCase();
       const list = (state.reference ? data.references : data.rows).filter(p => {
-        return (!query || [p.name, p.slug, p.symbol].some(field => field?.toLowerCase().includes(query)))
+        return (!query || searchTerms.get(p).some(field => field.includes(query)))
           && (!chain || p.chains.includes(chain)) && (!category || label(p) === category)
           && (state.reference || !scope || (scope === 'watch' ? p.watch : !p.watch));
       });
